@@ -1,0 +1,665 @@
+app.vue:
+
+<template>
+  <NuxtLayout>
+    <NuxtPage />
+  </NuxtLayout>
+</template>
+
+nuxt.config.ts:
+
+import { resolve } from 'path';
+import vuetify from 'vite-plugin-vuetify';
+
+export default defineNuxtConfig({
+  compatibilityDate: '2024-04-03',
+  devtools: { enabled: false },
+  alias: {
+    '@': resolve(__dirname, '/'),
+  },
+  css: ["~/assets/main.scss", "vuetify/styles", '@mdi/font/css/materialdesignicons.min.css'],
+  postcss: {
+    plugins: {
+      tailwindcss: {},
+      autoprefixer: {},
+    },
+  },
+  modules: [
+    '@pinia/nuxt',
+    '@nuxtjs/tailwindcss',
+  ],
+  build: {
+    transpile: ['vuetify'],
+  },
+  plugins: ['~/plugins/initAuth.ts', { src: '~/plugins/vuetify.ts', ssr: false }],
+  router: {
+    middleware: ['auth'],
+  },
+  vite: {
+    plugins: [
+      vuetify(),
+    ],
+  },
+});
+
+store/auth.ts:
+
+import { defineStore } from 'pinia';
+import axios from 'axios';
+
+interface AuthState {
+  token: string | null;
+  loading: boolean;
+  error: string | null;
+}
+
+export const useAuthStore = defineStore('auth', {
+  state: (): AuthState => ({
+    token: null,
+    loading: false,
+    error: null,
+  }),
+  actions: {
+    initialize() {
+      if (process.client) {
+        this.token = localStorage.getItem('token');
+        this.checkTokenExpiry();
+      }
+    },
+    async login(username: string, password: string) {
+      this.loading = true;
+      this.error = null;
+      try {
+        const response = await axios.post('http://localhost:8000/auth/login', { username, password });
+        const { token } = response.data;
+        this.token = token;
+        if (process.client) {
+          localStorage.setItem('token', token);
+          this.setTokenExpiry();
+        }
+      } catch (error: unknown) {
+        if (axios.isAxiosError(error)) {
+          this.error = error.response?.data?.message || 'Login failed. Please check your credentials.';
+        } else {
+          this.error = 'An unexpected error occurred.';
+        }
+      } finally {
+        this.loading = false;
+      }
+    },
+    logout() {
+      this.token = null;
+      if (process.client) {
+        localStorage.removeItem('token');
+      }
+    },
+    checkTokenExpiry() {
+      const expiry = localStorage.getItem('tokenExpiry');
+      if (expiry && new Date(expiry).getTime() <= Date.now()) {
+        this.logout();
+      }
+    },
+    setTokenExpiry() {
+      const expiryTime = new Date(Date.now() + 60 * 60 * 1000); 
+      localStorage.setItem('tokenExpiry', expiryTime.toString());
+    },
+  },
+});
+
+store/notes.ts:
+
+import { defineStore } from 'pinia';
+import axios from 'axios';
+
+interface Note {
+  id: string;
+  content: string;
+  date: Date;
+}
+
+interface NotesState {
+  notes: Note[];
+  itemsPerPage: number;
+  currentPage: number;
+  totalPages: number;
+  loading: boolean;
+  error: string | null;
+}
+
+export const useNotesStore = defineStore('notes', {
+  state: (): NotesState => ({
+    notes: [],
+    itemsPerPage: 10,
+    currentPage: 1,
+    totalPages: 1,
+    loading: false,
+    error: null,
+  }),
+  getters: {
+    sortedNotes: (state): Note[] => {
+      return [...state.notes].sort((a, b) => b.date.getTime() - a.date.getTime());
+    },
+    paginatedNotes: (state): Note[] => {
+      return state.sortedNotes.slice(0, state.currentPage * state.itemsPerPage);
+    },
+    getNoteById: (state): (id: string) => Note | undefined => {
+      return (id: string) => state.notes.find(note => note.id === id);
+    },
+    hasMoreNotes: (state): boolean => {
+      return state.currentPage < state.totalPages;
+    },
+  },
+  actions: {
+    async initialize() {
+      this.currentPage = 1;
+      this.notes = [];
+      await this.loadNotes();
+    },
+    async loadNotes(page = 1) {
+      this.loading = true;
+      this.error = null;
+      try {
+        const response = await axios.get(`http://localhost:8000/notes?page=${page}&limit=${this.itemsPerPage}`);
+        const { data, totalPages } = response.data;
+        this.notes = [...this.notes, ...data.map((note: any) => ({
+          ...note,
+          date: new Date(note.date),
+        }))];
+        this.totalPages = totalPages;
+        this.currentPage = page;
+      } catch (error: unknown) {
+        if (axios.isAxiosError(error)) {
+          this.error = error.response?.data?.message || 'Failed to load notes.';
+        } else {
+          this.error = 'An unexpected error occurred.';
+        }
+      } finally {
+        this.loading = false;
+      }
+    },
+    async addNote(content: string) {
+      this.loading = true;
+      this.error = null;
+      try {
+        const response = await axios.post('http://localhost:8000/notes', { content });
+        const newNote: Note = { ...response.data, date: new Date(response.data.date) };
+        this.notes.push(newNote);
+      } catch (error: unknown) {
+        if (axios.isAxiosError(error)) {
+          this.error = error.response?.data?.message || 'Failed to add note.';
+        } else {
+          this.error = 'An unexpected error occurred.';
+        }
+      } finally {
+        this.loading = false;
+      }
+    },
+    async editNote(id: string, content: string) {
+      this.loading = true;
+      this.error = null;
+      try {
+        await axios.put(`http://localhost:8000/notes/${id}`, { content });
+        const note = this.notes.find(note => note.id === id);
+        if (note) {
+          note.content = content;
+        }
+      } catch (error: unknown) {
+        if (axios.isAxiosError(error)) {
+          this.error = error.response?.data?.message || 'Failed to edit note.';
+        } else {
+          this.error = 'An unexpected error occurred.';
+        }
+      } finally {
+        this.loading = false;
+      }
+    },
+    async deleteNote(id: string) {
+      this.loading = true;
+      this.error = null;
+      try {
+        await axios.delete(`http://localhost:8000/notes/${id}`);
+        this.notes = this.notes.filter(note => note.id !== id);
+      } catch (error: unknown) {
+        if (axios.isAxiosError(error)) {
+          this.error = error.response?.data?.message || 'Failed to delete note.';
+        } else {
+          this.error = 'An unexpected error occurred.';
+        }
+      } finally {
+        this.loading = false;
+      }
+    },
+    loadMore() {
+      if (this.hasMoreNotes) {
+        this.currentPage += 1;
+        this.loadNotes(this.currentPage);
+      }
+    },
+  },
+});
+
+store/index.ts:
+
+import { defineStore } from 'pinia';
+import { useAuthStore } from './auth';
+import { useNotesStore } from './notes';
+
+export const useMainStore = defineStore('main', {
+  actions: {
+    nuxtServerInit() {
+      const authStore = useAuthStore();
+      const notesStore = useNotesStore();
+      authStore.initialize();
+      notesStore.initialize();
+    }
+  }
+});
+
+plugins/initAuth.ts:
+
+import { defineNuxtPlugin } from '#app';
+import { useAuthStore } from '../store/auth';
+
+export default defineNuxtPlugin(() => {
+  if (process.client) {
+    const authStore = useAuthStore();
+    authStore.initialize();
+  }
+});
+
+plugins/vuetify.ts:
+
+import { createVuetify } from 'vuetify';
+import 'vuetify/styles';
+import { aliases, mdi } from 'vuetify/iconsets/mdi';
+import { defineNuxtPlugin } from '#app';
+import * as components from 'vuetify/components';
+import * as directives from 'vuetify/directives';
+
+export default defineNuxtPlugin((nuxtApp) => {
+  const vuetify = createVuetify({
+    components,
+    directives,
+    icons: {
+      defaultSet: 'mdi',
+      aliases,
+      sets: {
+        mdi,
+      },
+    },
+    theme: {
+      defaultTheme: 'light',
+    },
+  });
+
+  nuxtApp.vueApp.use(vuetify);
+});
+
+components/LoginForm.vue:
+
+<template>
+  <v-form @submit.prevent="login">
+    <v-text-field v-model="username" label="Username" required></v-text-field>
+    <v-text-field v-model="password" label="Password" type="password" required></v-text-field>
+    <v-btn type="submit" :loading="isLoading">Login</v-btn>
+    <v-alert v-if="error" type="error">{{ error }}</v-alert>
+  </v-form>
+</template>
+
+<script lang="ts">
+import { defineComponent, ref, watch } from 'vue';
+import { useAuthStore } from '../store/auth';
+import { useRouter } from 'vue-router';
+import { useField, useForm } from 'vee-validate';
+import * as yup from 'yup';
+
+export default defineComponent({
+  setup(_, { emit }) {
+    const authStore = useAuthStore();
+    const router = useRouter();
+    const isLoading = ref(false);
+    const error = ref('');
+
+    const schema = yup.object({
+      username: yup.string().required('Username is required'),
+      password: yup.string().required('Password is required'),
+    });
+
+    const { handleSubmit, errors } = useForm({
+      validationSchema: schema,
+    });
+
+    const { value: username } = useField('username');
+    const { value: password } = useField('password');
+
+    watch(
+      () => authStore.loading,
+      (newVal) => {
+        isLoading.value = newVal;
+      }
+    );
+
+    watch(
+      () => authStore.error,
+      (newVal) => {
+        error.value = newVal;
+      }
+    );
+
+    const login = handleSubmit(async () => {
+      try {
+        await authStore.login(username.value, password.value);
+        emit('loginSuccess');
+        router.push('/note');
+      } catch (err) {
+        error.value = err.message;
+      }
+    });
+
+    return {
+      username,
+      password,
+      login,
+      isLoading,
+      error,
+      errors,
+    };
+  },
+});
+</script>
+
+components/NoteList.vue:
+
+<template>
+  <v-container>
+    <v-row>
+      <v-col cols="12">
+        <v-btn @click="openCreateModal" class="mb-4">Create Note</v-btn>
+        <v-skeleton-loader v-if="notesStore.loading" type="list-item-avatar" />
+        <v-alert v-if="notesStore.error" type="error">{{ notesStore.error }}</v-alert>
+        <v-list v-else>
+          <v-list-item v-for="note in notesStore.paginatedNotes" :key="note.id" class="mb-4">
+            <v-list-item-content>
+              <v-list-item-title>{{ note.content }}</v-list-item-title>
+              <v-list-item-subtitle>{{ new Date(note.date).toLocaleString() }}</v-list-item-subtitle>
+            </v-list-item-content>
+            <v-list-item-action>
+              <v-btn icon @click="openEditModal(note.id)"><v-icon>mdi-pencil</v-icon></v-btn>
+              <v-btn icon @click="openDeleteModal(note.id)"><v-icon>mdi-delete</v-icon></v-btn>
+            </v-list-item-action>
+          </v-list-item>
+        </v-list>
+        <v-btn @click="loadMore" v-if="notesStore.hasMoreNotes && !notesStore.loading" class="mt-4">Load More</v-btn>
+        <NoteModal v-if="showModal" :show="showModal" :note-id="modalNoteId" @close="closeModal" />
+      </v-col>
+    </v-row>
+  </v-container>
+</template>
+
+<script lang="ts">
+import { defineComponent, ref, onMounted } from 'vue';
+import { useNotesStore } from '../store/notes';
+import NoteModal from './NoteModal.vue';
+
+export default defineComponent({
+  components: {
+    NoteModal,
+  },
+  setup() {
+    const notesStore = useNotesStore();
+    const showModal = ref(false);
+    const modalNoteId = ref('');
+
+    const openCreateModal = () => {
+      modalNoteId.value = '';
+      showModal.value = true;
+    };
+
+    const openEditModal = (id: string) => {
+      modalNoteId.value = id;
+      showModal.value = true;
+    };
+
+    const openDeleteModal = (id: string) => {
+      const confirmed = confirm('Are you sure you want to delete this note?');
+      if (confirmed) {
+        notesStore.deleteNote(id);
+      }
+    };
+
+    const closeModal = () => {
+      showModal.value = false;
+    };
+
+    const loadMore = () => {
+      notesStore.loadMore();
+    };
+
+    onMounted(() => {
+      notesStore.initialize();
+    });
+
+    return {
+      notesStore,
+      openCreateModal,
+      openEditModal,
+      openDeleteModal,
+      closeModal,
+      loadMore,
+      showModal,
+      modalNoteId,
+    };
+  },
+});
+</script>
+
+components/NoteModal.vue:
+
+<template>
+  <v-dialog v-model="show" max-width="600px">
+    <v-card>
+      <v-card-title>{{ isEditing ? 'Edit Note' : 'Create Note' }}</v-card-title>
+      <v-card-text>
+        <v-form @submit.prevent="submitForm">
+          <v-textarea
+            v-model="noteContent"
+            placeholder="Write your note here..."
+            :rules="[v => !!v || 'Note content is required']"
+            required
+          ></v-textarea>
+          <v-btn type="submit" class="mt-4" :loading="isLoading">{{ isEditing ? 'Save' : 'Create' }}</v-btn>
+          <v-btn @click="close" class="mt-4">Close</v-btn>
+        </v-form>
+      </v-card-text>
+    </v-card>
+  </v-dialog>
+</template>
+
+<script lang="ts">
+import { defineComponent, ref, watch } from 'vue';
+import { useNotesStore } from '../store/notes';
+import { useField, useForm } from 'vee-validate';
+import * as yup from 'yup';
+
+export default defineComponent({
+  props: {
+    show: Boolean,
+    noteId: String,
+  },
+  setup(props, { emit }) {
+    const notesStore = useNotesStore();
+    const isLoading = ref(false);
+    const isEditing = ref(false);
+
+    const schema = yup.object({
+      noteContent: yup.string().required('Note content is required'),
+    });
+
+    const { handleSubmit, errors, resetForm } = useForm({
+      validationSchema: schema,
+    });
+
+    const { value: noteContent } = useField('noteContent');
+
+    const resetState = () => {
+      if (props.noteId) {
+        const note = notesStore.getNoteById(props.noteId);
+        noteContent.value = note ? note.content : '';
+        isEditing.value = true;
+      } else {
+        noteContent.value = '';
+        isEditing.value = false;
+      }
+      resetForm();
+    };
+
+    watch(
+      () => props.noteId,
+      resetState,
+      { immediate: true }
+    );
+
+    watch(
+      () => props.show,
+      (newVal) => {
+        if (!newVal) {
+          resetState();
+        }
+      }
+    );
+
+    const saveNote = async () => {
+      isLoading.value = true;
+      try {
+        if (isEditing.value) {
+          await notesStore.editNote(props.noteId!, noteContent.value);
+        } else {
+          await notesStore.addNote(noteContent.value);
+        }
+        close();
+      } catch (error) {
+        console.error(error);
+      } finally {
+        isLoading.value = false;
+      }
+    };
+
+    const close = () => {
+      emit('close');
+    };
+
+    const submitForm = handleSubmit(saveNote);
+
+    return {
+      noteContent,
+      saveNote,
+      close,
+      isEditing,
+      isLoading,
+      submitForm,
+      errors,
+    };
+  },
+});
+</script>
+
+
+pages/index.vue:
+
+<template>
+  <v-container>
+    <v-row justify="center">
+      <v-col cols="12" md="8">
+        <v-card>
+          <v-card-title class="text-h5">Login Page</v-card-title>
+          <v-card-text>
+            <LoginForm @loginSuccess="handleLoginSuccess" />
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+  </v-container>
+</template>
+
+<script lang="ts">
+import { defineComponent } from 'vue';
+const LoginForm = defineAsyncComponent(() => import('../components/LoginForm.vue'));
+import { useRouter } from 'vue-router';
+
+export default defineComponent({
+  components: {
+    LoginForm,
+  },
+  setup() {
+    const router = useRouter();
+
+    const handleLoginSuccess = () => {
+      router.push('/note');
+    };
+
+    return {
+      handleLoginSuccess,
+    };
+  },
+});
+</script>
+
+pages/note.vue:
+
+<template>
+  <v-container>
+    <v-row justify="center">
+      <v-col cols="12" md="8">
+        <v-card>
+          <v-card-title class="text-h5">My Notes</v-card-title>
+          <v-card-text>
+            <NoteList />
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+  </v-container>
+</template>
+
+<script lang="ts">
+import { defineComponent } from 'vue';
+const NoteList = defineAsyncComponent(() => import('../components/NoteList.vue'));
+
+export default defineComponent({
+  components: {
+    NoteList,
+  },
+});
+</script>
+
+Dockerfile:
+
+FROM node:16-alpine as build-stage
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM nginx:stable-alpine
+COPY --from=build-stage /app/.output /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+
+docker-compose.yml:
+
+version: '3'
+services:
+  frontend:
+    build: .
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  backend:
+    image: thrashches/backend_for_test_task
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./test.db

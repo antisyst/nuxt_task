@@ -1,0 +1,15 @@
+version: '3'
+services:
+  frontend:
+    build: .
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  backend:
+    image: thrashches/backend_for_test_task
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./test.db
